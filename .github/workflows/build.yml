@@ -38,15 +38,43 @@ jobs:
     
     - name: Build in Docker container
       run: |
+        # 创建输出目录（在宿主机上）
+        mkdir -p ${{ github.workspace }}/build_output
+        
         docker run --rm \
           -v ${{ github.workspace }}:/workspace \
           -v ~/.cache/bazel:/root/.cache/bazel \
           -v ~/.cache/bazelisk:/root/.cache/bazelisk \
-          -w /workspace \
+          -e USER=root \
+          -e HOME=/home/root/mediapipe \
+          --user root \
           kejod15117/mediapipe:base \
           bash -c "
-            # 设置 Bazel 输出目录
-            export BUILD_OUTPUT_DIR=/workspace/bazel-out
+            # 设置环境变量
+            export USER=root
+            export HOME=/home/\$USER/mediapipe
+            
+            # 检查是否存在 MediaPipe workspace
+            if [ -f /workspace/WORKSPACE ]; then
+              echo 'Found WORKSPACE file in /workspace'
+              cd /workspace
+            elif [ -f \$HOME/WORKSPACE ]; then
+              echo 'Found WORKSPACE file in \$HOME'
+              cd \$HOME
+              # 如果代码在容器的 HOME 目录，复制当前仓库的文件
+              cp -r /workspace/* . 2>/dev/null || true
+            else
+              echo 'ERROR: No WORKSPACE file found'
+              echo 'Checking directory structure...'
+              ls -la /workspace/
+              ls -la \$HOME/ || echo 'HOME directory not accessible'
+              exit 1
+            fi
+            
+            # 显示当前目录
+            echo 'Current directory:' \$(pwd)
+            echo 'Directory contents:'
+            ls -la
             
             # 执行构建命令
             bazel build \
@@ -57,20 +85,41 @@ jobs:
               --define=xnn_enable_arm_i8mm=true \
               mediapipe/tasks/cc/genai/inference/c:llm_inference_engine_cpu_main
             
-            # 创建输出目录
-            mkdir -p /workspace/build_output
+            # 查找并复制构建产物
+            echo '=== Finding build artifacts ==='
             
-            # 复制构建产物
-            find bazel-out -name 'llm_inference_engine_cpu_main' -type f -exec cp {} /workspace/build_output/ \;
+            # 查找主要的可执行文件
+            find bazel-out -name 'llm_inference_engine_cpu_main' -type f | while read file; do
+              echo \"Found: \$file\"
+              cp \"\$file\" /workspace/build_output/
+            done
             
-            # 复制其他相关文件（如果有）
-            find bazel-bin -path '*mediapipe/tasks/cc/genai/inference/c*' -name '*.so' -o -name '*.a' | \
-              xargs -I {} cp {} /workspace/build_output/ 2>/dev/null || true
+            # 查找相关的库文件
+            find bazel-bin -path '*mediapipe/tasks/cc/genai/inference/c*' KATEX_INLINE_OPEN -name '*.so' -o -name '*.a' KATEX_INLINE_CLOSE 2>/dev/null | while read file; do
+              echo \"Found library: \$file\"
+              cp \"\$file\" /workspace/build_output/
+            done || true
+            
+            # 如果在 HOME 目录构建，也要检查那里的输出
+            if [ \"\$(pwd)\" != \"/workspace\" ]; then
+              find ./bazel-out -name 'llm_inference_engine_cpu_main' -type f -exec cp {} /workspace/build_output/ \; 2>/dev/null || true
+              find ./bazel-bin -path '*mediapipe/tasks/cc/genai/inference/c*' KATEX_INLINE_OPEN -name '*.so' -o -name '*.a' KATEX_INLINE_CLOSE -exec cp {} /workspace/build_output/ \; 2>/dev/null || true
+            fi
             
             # 列出构建产物
-            echo '=== Build artifacts ==='
+            echo '=== Build artifacts in output directory ==='
             ls -la /workspace/build_output/
           "
+    
+    - name: Check build output
+      run: |
+        if [ -z "$(ls -A build_output)" ]; then
+          echo "ERROR: No build artifacts found!"
+          echo "This might indicate a build failure or incorrect output path."
+          exit 1
+        fi
+        echo "Build artifacts found:"
+        ls -la build_output/
     
     - name: Create artifact archive
       run: |
@@ -110,20 +159,3 @@ jobs:
         name: build-info
         path: build_info.txt
         retention-days: 30
-    
-    - name: Create download instructions
-      run: |
-        echo "# Download Instructions" > DOWNLOAD.md
-        echo "" >> DOWNLOAD.md
-        echo "The build artifacts can be downloaded from the Actions tab of this repository." >> DOWNLOAD.md
-        echo "" >> DOWNLOAD.md
-        echo "1. Go to the [Actions](../../actions) tab" >> DOWNLOAD.md
-        echo "2. Click on the latest workflow run" >> DOWNLOAD.md
-        echo "3. Scroll down to the 'Artifacts' section" >> DOWNLOAD.md
-        echo "4. Download 'llm-inference-engine-android-arm64'" >> DOWNLOAD.md
-        echo "" >> DOWNLOAD.md
-        echo "The artifact contains:" >> DOWNLOAD.md
-        echo "- llm_inference_engine_android_arm64.tar.gz: Compressed archive of all build outputs" >> DOWNLOAD.md
-        echo "- build_output/: Directory containing individual build files" >> DOWNLOAD.md
-        
-        cat DOWNLOAD.md
