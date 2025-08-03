@@ -1,51 +1,129 @@
-name: Build and Push Docker Image
+name: Build MediaPipe LLM Inference Engine
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build-and-push:
+  build:
     runs-on: ubuntu-latest
     
     steps:
-      # 检出代码
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      # 设置 Docker Buildx
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
-      # 登录到 Docker Hub
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-      
-      # 生成时间戳
-      - name: Generate build timestamp
-        id: timestamp
-        run: echo "timestamp=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
-      
-      # 构建并推送 Docker 镜像
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_HUB_USERNAME }}/mediapipe:${{ steps.timestamp.outputs.timestamp }}
-            ${{ secrets.DOCKER_HUB_USERNAME }}/mediapipe:latest
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Cache Bazel
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/bazel
+          ~/.cache/bazelisk
+        key: ${{ runner.os }}-bazel-${{ hashFiles('**/BUILD', '**/WORKSPACE', '**/*.bzl') }}
+        restore-keys: |
+          ${{ runner.os }}-bazel-
+    
+    - name: Cache Docker layers
+      uses: actions/cache@v4
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+    
+    - name: Build in Docker container
+      run: |
+        docker run --rm \
+          -v ${{ github.workspace }}:/workspace \
+          -v ~/.cache/bazel:/root/.cache/bazel \
+          -v ~/.cache/bazelisk:/root/.cache/bazelisk \
+          -w /workspace \
+          kejod15117/mediapipe:base \
+          bash -c "
+            # 设置 Bazel 输出目录
+            export BUILD_OUTPUT_DIR=/workspace/bazel-out
+            
+            # 执行构建命令
+            bazel build \
+              --client_env=CC=clang-16 \
+              --cxxopt=-DABSL_FLAGS_STRIP_NAMES=0 \
+              -c opt \
+              --config=android_arm64 \
+              --define=xnn_enable_arm_i8mm=true \
+              mediapipe/tasks/cc/genai/inference/c:llm_inference_engine_cpu_main
+            
+            # 创建输出目录
+            mkdir -p /workspace/build_output
+            
+            # 复制构建产物
+            find bazel-out -name 'llm_inference_engine_cpu_main' -type f -exec cp {} /workspace/build_output/ \;
+            
+            # 复制其他相关文件（如果有）
+            find bazel-bin -path '*mediapipe/tasks/cc/genai/inference/c*' -name '*.so' -o -name '*.a' | \
+              xargs -I {} cp {} /workspace/build_output/ 2>/dev/null || true
+            
+            # 列出构建产物
+            echo '=== Build artifacts ==='
+            ls -la /workspace/build_output/
+          "
+    
+    - name: Create artifact archive
+      run: |
+        cd build_output
+        tar -czf ../llm_inference_engine_android_arm64.tar.gz *
+        cd ..
+        echo "Archive created: llm_inference_engine_android_arm64.tar.gz"
+        ls -lh llm_inference_engine_android_arm64.tar.gz
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: llm-inference-engine-android-arm64
+        path: |
+          llm_inference_engine_android_arm64.tar.gz
+          build_output/
+        retention-days: 30
+    
+    - name: Generate build info
+      run: |
+        echo "# Build Information" > build_info.txt
+        echo "Build Date: $(date)" >> build_info.txt
+        echo "Git Commit: ${{ github.sha }}" >> build_info.txt
+        echo "Git Branch: ${{ github.ref_name }}" >> build_info.txt
+        echo "" >> build_info.txt
+        echo "## Build Command:" >> build_info.txt
+        echo '```' >> build_info.txt
+        echo "bazel build --client_env=CC=clang-16 --cxxopt=-DABSL_FLAGS_STRIP_NAMES=0 -c opt --config=android_arm64 --define=xnn_enable_arm_i8mm=true mediapipe/tasks/cc/genai/inference/c:llm_inference_engine_cpu_main" >> build_info.txt
+        echo '```' >> build_info.txt
+        echo "" >> build_info.txt
+        echo "## Build Artifacts:" >> build_info.txt
+        ls -la build_output/ >> build_info.txt || echo "No artifacts found" >> build_info.txt
+    
+    - name: Upload build info
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-info
+        path: build_info.txt
+        retention-days: 30
+    
+    - name: Create download instructions
+      run: |
+        echo "# Download Instructions" > DOWNLOAD.md
+        echo "" >> DOWNLOAD.md
+        echo "The build artifacts can be downloaded from the Actions tab of this repository." >> DOWNLOAD.md
+        echo "" >> DOWNLOAD.md
+        echo "1. Go to the [Actions](../../actions) tab" >> DOWNLOAD.md
+        echo "2. Click on the latest workflow run" >> DOWNLOAD.md
+        echo "3. Scroll down to the 'Artifacts' section" >> DOWNLOAD.md
+        echo "4. Download 'llm-inference-engine-android-arm64'" >> DOWNLOAD.md
+        echo "" >> DOWNLOAD.md
+        echo "The artifact contains:" >> DOWNLOAD.md
+        echo "- llm_inference_engine_android_arm64.tar.gz: Compressed archive of all build outputs" >> DOWNLOAD.md
+        echo "- build_output/: Directory containing individual build files" >> DOWNLOAD.md
+        
+        cat DOWNLOAD.md
