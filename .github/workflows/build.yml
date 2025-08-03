@@ -45,38 +45,45 @@ jobs:
           -v ${{ github.workspace }}:/workspace \
           -v ~/.cache/bazel:/root/.cache/bazel \
           -v ~/.cache/bazelisk:/root/.cache/bazelisk \
-          -e USER=root \
-          -e HOME=/home/root/mediapipe \
+          -e USER=ubuntu \
+          -e HOME=/home/ubuntu/mediapipe \
           --user root \
           kejod15117/mediapipe:base \
           bash -c "
             # 设置环境变量
-            export USER=root
-            export HOME=/home/\$USER/mediapipe
+            export USER=ubuntu
+            export HOME=/home/ubuntu/mediapipe
             
-            # 检查是否存在 MediaPipe workspace
-            if [ -f /workspace/WORKSPACE ]; then
-              echo 'Found WORKSPACE file in /workspace'
-              cd /workspace
-            elif [ -f \$HOME/WORKSPACE ]; then
-              echo 'Found WORKSPACE file in \$HOME'
+            # 检查 MediaPipe 目录
+            echo 'Checking MediaPipe installation...'
+            if [ -d \"\$HOME\" ]; then
+              echo 'Found MediaPipe at: '\$HOME
               cd \$HOME
-              # 如果代码在容器的 HOME 目录，复制当前仓库的文件
-              cp -r /workspace/* . 2>/dev/null || true
+              
+              # 如果需要，同步当前仓库的更改
+              if [ -d /workspace/.git ]; then
+                echo 'Syncing repository changes...'
+                # 复制当前仓库的特定文件（如果需要）
+                # cp -r /workspace/* . 2>/dev/null || true
+              fi
+            elif [ -f /workspace/WORKSPACE ]; then
+              echo 'Using workspace directory'
+              cd /workspace
             else
-              echo 'ERROR: No WORKSPACE file found'
-              echo 'Checking directory structure...'
-              ls -la /workspace/
-              ls -la \$HOME/ || echo 'HOME directory not accessible'
+              echo 'ERROR: MediaPipe directory not found'
+              echo 'Checking available directories:'
+              ls -la /home/ || true
+              ls -la /home/ubuntu/ || true
               exit 1
             fi
             
-            # 显示当前目录
+            # 显示当前目录信息
             echo 'Current directory:' \$(pwd)
-            echo 'Directory contents:'
-            ls -la
+            echo 'WORKSPACE file check:'
+            ls -la WORKSPACE || echo 'WORKSPACE file not found!'
             
             # 执行构建命令
+            echo 'Starting build...'
             bazel build \
               --client_env=CC=clang-16 \
               --cxxopt=-DABSL_FLAGS_STRIP_NAMES=0 \
@@ -89,7 +96,7 @@ jobs:
             echo '=== Finding build artifacts ==='
             
             # 查找主要的可执行文件
-            find bazel-out -name 'llm_inference_engine_cpu_main' -type f | while read file; do
+            find bazel-out -name 'llm_inference_engine_cpu_main' -type f 2>/dev/null | while read file; do
               echo \"Found: \$file\"
               cp \"\$file\" /workspace/build_output/
             done
@@ -100,62 +107,31 @@ jobs:
               cp \"\$file\" /workspace/build_output/
             done || true
             
-            # 如果在 HOME 目录构建，也要检查那里的输出
-            if [ \"\$(pwd)\" != \"/workspace\" ]; then
-              find ./bazel-out -name 'llm_inference_engine_cpu_main' -type f -exec cp {} /workspace/build_output/ \; 2>/dev/null || true
-              find ./bazel-bin -path '*mediapipe/tasks/cc/genai/inference/c*' KATEX_INLINE_OPEN -name '*.so' -o -name '*.a' KATEX_INLINE_CLOSE -exec cp {} /workspace/build_output/ \; 2>/dev/null || true
-            fi
+            # 也检查 bazel-bin 下的可执行文件
+            find bazel-bin -path '*mediapipe/tasks/cc/genai/inference/c*' -name 'llm_inference_engine_cpu_main' -type f 2>/dev/null | while read file; do
+              echo \"Found binary: \$file\"
+              cp \"\$file\" /workspace/build_output/
+            done || true
             
             # 列出构建产物
             echo '=== Build artifacts in output directory ==='
             ls -la /workspace/build_output/
+            
+            # 如果没有找到产物，显示更多调试信息
+            if [ -z \"\$(ls -A /workspace/build_output/)\" ]; then
+              echo 'WARNING: No artifacts copied. Checking bazel output structure:'
+              echo '--- bazel-out directory ---'
+              find bazel-out -type f -name '*llm_inference*' | head -20
+              echo '--- bazel-bin directory ---'
+              find bazel-bin -type f -path '*genai/inference*' | head -20
+            fi
           "
     
     - name: Check build output
       run: |
-        if [ -z "$(ls -A build_output)" ]; then
+        if [ -z "$(ls -A build_output 2>/dev/null)" ]; then
           echo "ERROR: No build artifacts found!"
           echo "This might indicate a build failure or incorrect output path."
           exit 1
         fi
-        echo "Build artifacts found:"
-        ls -la build_output/
-    
-    - name: Create artifact archive
-      run: |
-        cd build_output
-        tar -czf ../llm_inference_engine_android_arm64.tar.gz *
-        cd ..
-        echo "Archive created: llm_inference_engine_android_arm64.tar.gz"
-        ls -lh llm_inference_engine_android_arm64.tar.gz
-    
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: llm-inference-engine-android-arm64
-        path: |
-          llm_inference_engine_android_arm64.tar.gz
-          build_output/
-        retention-days: 30
-    
-    - name: Generate build info
-      run: |
-        echo "# Build Information" > build_info.txt
-        echo "Build Date: $(date)" >> build_info.txt
-        echo "Git Commit: ${{ github.sha }}" >> build_info.txt
-        echo "Git Branch: ${{ github.ref_name }}" >> build_info.txt
-        echo "" >> build_info.txt
-        echo "## Build Command:" >> build_info.txt
-        echo '```' >> build_info.txt
-        echo "bazel build --client_env=CC=clang-16 --cxxopt=-DABSL_FLAGS_STRIP_NAMES=0 -c opt --config=android_arm64 --define=xnn_enable_arm_i8mm=true mediapipe/tasks/cc/genai/inference/c:llm_inference_engine_cpu_main" >> build_info.txt
-        echo '```' >> build_info.txt
-        echo "" >> build_info.txt
-        echo "## Build Artifacts:" >> build_info.txt
-        ls -la build_output/ >> build_info.txt || echo "No artifacts found" >> build_info.txt
-    
-    - name: Upload build info
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-info
-        path: build_info.txt
-        retention-days: 30
+        echo 
